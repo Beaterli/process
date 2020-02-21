@@ -1,0 +1,181 @@
+{
+  "name": "stream-data-processor",
+  "nimbus": "localhost",
+  "workers": 1,
+  "spout_max_pending": 10000,
+  "message_timeout_sec": 60,
+  "lifetime_minute": 5,
+  "data_source": {
+    "mysql": {
+      "dataSourceClassName": "com.mysql.cj.jdbc.MysqlDataSource",
+      "dataSource.url": "jdbc:mysql://localhost:3306/weibo?useUnicode=true&characterEncoding=utf-8&serverTimezone=UTC",
+      "dataSource.user": "root",
+      "dataSource.password": "experimental",
+      "maximumPoolSize": "10"
+    }
+  },
+  "redis": {
+    "singleton": {
+      "host": "localhost",
+      "port": "6379",
+      "password": "experimental",
+      "timeout": "5000",
+      "database": "0"
+    }
+  },
+  "topology": {
+    "kafka_spout": {
+      "type": "spout",
+      "class": "KafkaSpout",
+      "brokers": "192.168.56.101:9092",
+      "topic": "scrappy",
+      "group.id": "process-debug",
+      "key.deserializer": "org.apache.kafka.common.serialization.StringDeserializer",
+      "value.deserializer": "org.apache.kafka.common.serialization.StringDeserializer",
+      "parallelism": 1
+    },
+    "parse": {
+      "type": "bolt",
+      "class": "com.presisco.process.storm.bolt.RecordParseBolt",
+      "upstream": "kafka_spout",
+      "parallelism": 1
+    },
+    "blog_parse": {
+      "type": "bolt",
+      "class": "com.presisco.process.storm.bolt.BlogParseBolt",
+      "upstream": {
+        "parse": "blog"
+      },
+      "parallelism": 1
+    },
+    "comment_parse": {
+      "type": "bolt",
+      "class": "com.presisco.process.storm.bolt.CommentParseBolt",
+      "upstream": {
+        "parse": "comment"
+      },
+      "parallelism": 1
+    },
+    "tag_identify": {
+      "type": "bolt",
+      "class": "com.presisco.process.storm.bolt.TagIdentifyBolt",
+      "redis": "singleton",
+      "upstream": {
+        "blog_parse": "tag"
+      },
+      "parallelism": 1
+    },
+    "user_identify": {
+      "type": "bolt",
+      "class": "com.presisco.process.storm.bolt.UserIdentifyBolt",
+      "redis": "singleton",
+      "upstream": {
+        "blog_parse": "user",
+        "comment_parse": "user"
+      },
+      "grouping": "fields",
+      "group_params": [
+        "uid"
+      ],
+      "parallelism": 1
+    },
+    "existence_check": {
+      "type": "bolt",
+      "class": "com.presisco.process.storm.bolt.ExistenceBolt",
+      "redis": "singleton",
+      "upstream": {
+        "blog_parse": [
+          "blog",
+          "root"
+        ],
+        "comment_parse": "comment"
+      },
+      "grouping": "fields",
+      "group_params": [
+        "id"
+      ],
+      "parallelism": 1
+    },
+    "replace_window": {
+      "type": "bolt",
+      "class": "com.presisco.process.storm.bolt.WriteWindowBolt",
+      "upstream": {
+        "user_identify": "user",
+        "tag_identify": [
+          "new_tag",
+          "blog_with_tag"
+        ],
+        "existence_check": [
+          "new_blog",
+          "new_comment",
+          "new_root"
+        ]
+      },
+      "keep_stream": true,
+      "grouping": "fields",
+      "group_params": [
+        "id"
+      ],
+      "parallelism": 1,
+      "window_mode": "tumbling_duration",
+      "window_length": 2
+    },
+    "update_window": {
+      "type": "bolt",
+      "class": "com.presisco.process.storm.bolt.UpdateWindowBolt",
+      "upstream": {
+        "existence_check": [
+          "update_blog",
+          "update_comment"
+        ]
+      },
+      "grouping": "fields",
+      "group_params": [
+        "id"
+      ],
+      "parallelism": 3,
+      "streams": [
+        "update_blog",
+        "update_comment"
+      ],
+      "window_mode": "tumbling_duration",
+      "window_length": 7
+    },
+    "replace": {
+      "type": "bolt",
+      "class": "SimpleReplaceBolt",
+      "data_source": "mysql",
+      "timeout": 5,
+      "rollback": true,
+      "emit_on_failure": false,
+      "keep_stream": true,
+      "upstream": "replace_window",
+      "stream_table_map": {
+        "new_blog": "blog",
+        "new_root": "root",
+        "new_comment": "comment",
+        "blog_with_tag": "blog_with_tag",
+        "new_tag": "tag",
+        "user": "blog_user"
+      },
+      "grouping": "shuffle",
+      "parallelism": 1
+    },
+    "update": {
+      "type": "bolt",
+      "class": "com.presisco.process.storm.bolt.SimpleUpdateBolt",
+      "data_source": "mysql",
+      "timeout": 5,
+      "rollback": true,
+      "emit_on_failure": false,
+      "upstream": "update_window",
+      "keep_stream": true,
+      "stream_table_map": {
+        "update_blog": "blog",
+        "update_comment": "comment"
+      },
+      "grouping": "shuffle",
+      "parallelism": 1
+    }
+  }
+}
